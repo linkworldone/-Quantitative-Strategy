@@ -1,24 +1,30 @@
 # Crypto perpetual paper research
 
-## Lower-turnover model
+## 5-minute paper simulator
 
-Use `trend_paper.py` for the hourly model. It uses confirmed 1-hour candles, a 20-bar Donchian breakout with EMA20/EMA50 trend confirmation, 20-bar ATR stop sizing, 10-bar channel exit, 12-hour re-entry cooldown, 0.5% equity risk per trade, 2% aggregate stop-risk ceiling, and a 3x account-wide notional cap.
+`trend_paper.py` consumes public 5-minute perpetual futures prices from OKX or Binance and never sends exchange orders. It uses a 10,000 USD virtual account, a 3x account-wide notional cap, estimated taker fees, spread and slippage, and a 10-minute cooldown. The per-position target and stop are each set to 10% of the initial account principal (1,000 USD gross PnL at the bracket), which is deliberately aggressive and suitable only for paper research.
 
-Fee defaults are per side: taker 5 bps (0.05%), assumed spread 2 bps and slippage 2 bps. The simulator charges an adverse synthetic fill and fee on both entry and exit. These are conservative assumptions, not a promise of actual fills. Set the fee to the rate shown in your account. Do not set maker rates unless the order logic and fill model genuinely ensure maker execution.
+Long entries include a 12-bar breakout with volume confirmation. The new gainer-short rule ranks the configured nine-symbol watchlist by rolling 24-hour return; it only considers the top three, requires at least three consecutive completed daily candles with higher closes, and waits for a 5-minute bearish breakdown with volume confirmation before opening a short. The gainer rank refreshes every five minutes and the daily streak is refreshed every six hours. This is a watchlist-relative ranking, not the exchange-wide gainers board.
 
-Run for 60 days:
+Run for 60 days on OKX:
+
 ```powershell
-python trend_paper.py --exchange okx --days 60 --taker-fee-bps 5
+python trend_paper.py --exchange okx --days 60
 ```
-For Binance, use `--exchange binance` only where Binance's API is available. This environment received Binance HTTP 451 restricted-location responses, so Binance simulation could not be verified here. The script has no credentials and never sends orders. Trade/equity logs are `trend_trades.csv` and `trend_equity.csv`; state is `trend_state.json`.
 
-Lower turnover comes from evaluating only closed hourly bars and waiting 12 hours after exit before re-entry. This reduces churn but can miss moves and does not guarantee higher net returns. Funding is not yet charged in this model, and spread is an estimate rather than live bid/ask execution. Review costs separately before using results.
+Run on Binance only where its public derivatives API is accessible:
 
-## Existing experimental modules
+```powershell
+python trend_paper.py --exchange binance --days 60
+```
 
-- `live_paper.py`: earlier tick-sample prime heuristic; retained for comparison, not recommended as the primary evaluation.
-- `context_feeds.py`: public derivatives, sentiment/news, optional CoinGecko supply/OpenAI summaries.
-- `context_daemon.py`: five-minute context snapshots; these are not consumed by `trend_paper.py` signals.
-- `cost_model.py`: reusable cost formula helpers.
+Use `Ctrl+C` to stop. Trades are appended to `paper_5m_trades.csv`, equity snapshots to `paper_5m_equity.csv`, and account state is stored in `paper_5m_state.json`. To begin a fresh observation, stop the program and move or delete that state file and the two CSV files after saving any results you need.
 
-The regular USDⓈ-M example fee in Binance's published fee explanation is maker 0.02%, taker 0.05%, while the actual fee varies by VIP level and discounts. OKX says rates depend on the account's tier and instrument; use the rate displayed for your own account. Sources: [Binance Futures fee explanation](https://www.binance.com/en/support/faq/detail/360033544231), [OKX fee rules](https://www.okx.com/help/trading-fee-rules-faq), [OKX account fee-rate API](https://www.okx.com/docs-v5/en/#rest-api-account-get-fee-rates).
+Fees, spread and slippage are estimates; funding, contract-specific lot/face value, liquidation mechanics, and live order-book fill simulation are not yet modeled. Binance access previously returned HTTP 451 in the user's environment, while OKX REST and WebSocket have been used for local data tests. A 60-day simulation is a research sample, not evidence of future profitability.
+
+## Earlier experimental modules
+
+- `live_paper.py`: earlier tick-sample prime heuristic.
+- `context_feeds.py` and `context_daemon.py`: supplemental public context prototypes; they are not consumed by the current strategy signals.
+- `cost_model.py`: reusable cost formula helpers; not the active fill engine for `trend_paper.py`.
+
