@@ -1,12 +1,31 @@
-# 本地实时永续合约模拟交易
-只使用 Binance 或 OKX 公开行情，不需要密钥，不具备下单代码。实时订阅标记价格/永续 ticker，估算短线波动，运行偏空的规则策略，只有向上波动异动时允许做多。虚拟资金 10,000 美元，名义仓位上限 3 倍；单笔风险预算 0.5%，总止损风险上限 2%，止损距离为近期波动的 2.5 倍并限制在 0.6%-4%，单边手续费估算 0.05%。净值从峰值回撤 10% 后停止开新仓。
+# Crypto perpetual paper research: live data adapters
 
-Windows 启动：
-    python -m venv .venv
-    .\.venv\Scripts\Activate.ps1
-    pip install -r requirements.txt
-    python live_paper.py --exchange binance --days 60
-OKX：将 exchange 改为 okx。两个月使用 60 天；三个月另跑 90 天。交易记录保存至 trades.csv，净值保存至 equity.csv，状态保存至 paper_state.json。Ctrl+C 可停止，重启会恢复模拟账户。
+Files:
+- `live_paper.py`: local-only public Binance/OKX market-stream simulator.
+- `context_feeds.py`: Binance derivatives, Alternative.me sentiment, GDELT news, optional CoinGecko supply and OpenAI summaries.
+- `cost_model.py`: contract sizing and spread/slippage/funding/fee formulas.
+- `context_daemon.py`: five-minute timestamped context snapshots in `context.jsonl`.
 
-这是研究原型：用实时行情近似成交，尚未模拟资金费、点差、深度滑点、精确合约面值和强平规则；策略也未经验证。新闻、AI、最大供给、市场情绪及链上转账尚未接入，不能假称已用于决策。聪明钱方向无法从公开账户多空比直接识别。不得以本程序结果证明未来收益。
+## Optional API configuration
+No exchange trading keys are required or used. Set `COINGECKO_DEMO_API_KEY` for supply lookup and `OPENAI_API_KEY` for AI summarization; optionally set `OPENAI_MODEL`. Keep keys in local environment variables and never commit them. AI summarizes sourced evidence only and cannot create/override orders.
 
+## Start
+Python 3.10+:
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+python context_daemon.py --exchange binance --symbols BTCUSDT,ETHUSDT --coins bitcoin,ethereum
+```
+In a second terminal:
+```powershell
+python live_paper.py --exchange binance --days 60
+```
+Use exchange=okx for price paper feed. Context snapshots append every five minutes. Keep model settings fixed during the 60-day observation.
+
+## Data integrity and important limit
+Unavailable inputs are explicitly tagged, never silently treated as neutral. Binance top-trader ratio is a positioning proxy, not verified “smart money.” Fear & Greed is market-wide. GDELT provides article metadata/headlines, not verified full-text sentiment. Supply requires canonical CoinGecko IDs and API key. General cross-chain whale-flow requires a dedicated provider/key and correct chain/token mapping; until configured this input is unavailable.
+
+**The live_paper execution loop is not yet wired to consume context_daemon snapshots or cost_model helpers.** Its fills/PnL remain simplified and do not fully account for funding, spread, depth/slippage, contract size, or liquidation mechanics. The adapters and formulas are available for integration, but this is not yet a cost-adjusted complete simulation. No real orders are sent. Do not treat results as validated or predictive.
+
+Sources: [Binance USD-M Futures market data](https://developers.binance.com/docs/derivatives/usds-margined-futures/market-data), [Alternative.me Fear & Greed](https://alternative.me/crypto/fear-and-greed-index/), [OpenAI Responses API](https://platform.openai.com/docs/api-reference/responses), [CoinGecko API](https://docs.coingecko.com/reference/coins-id).
