@@ -1,5 +1,5 @@
 """Hourly Donchian/EMA trend paper trader. Public prices only; no order API."""
-import asyncio, csv, json, math, time, argparse, urllib.parse, urllib.request
+import asyncio, csv, json, math, time, argparse, urllib.parse, urllib.request, urllib.error, subprocess, shutil
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -23,7 +23,19 @@ class Position:
 
 def get_json(url):
     req=urllib.request.Request(url,headers={"User-Agent":"local-paper/1.0"})
-    with urllib.request.urlopen(req,timeout=15) as r:return json.loads(r.read())
+    try:
+        with urllib.request.urlopen(req,timeout=15) as r:return json.loads(r.read())
+    except (urllib.error.URLError,TimeoutError) as py_error:
+        # Some Windows Python/proxy combinations fail TLS while Windows PowerShell succeeds.
+        ps=shutil.which("powershell.exe") or shutil.which("powershell")
+        if not ps:raise py_error
+        safe_url=url.replace("'","''")
+        command="$ProgressPreference='SilentlyContinue'; Invoke-RestMethod -Uri '"+safe_url+"' | ConvertTo-Json -Depth 10 -Compress"
+        try:
+            out=subprocess.run([ps,"-NoLogo","-NoProfile","-NonInteractive","-Command",command],capture_output=True,text=True,timeout=25,check=True)
+            return json.loads(out.stdout)
+        except Exception as ps_error:
+            raise RuntimeError(f"Python HTTPS failed ({py_error}); PowerShell fallback failed ({ps_error})") from ps_error
 
 def warmup(exchange,symbol):
     if exchange=="binance":
