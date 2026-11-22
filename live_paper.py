@@ -63,6 +63,7 @@ async def okx(p):
   try:
    async with websockets.connect("wss://ws.okx.com/ws/v5/public",ping_interval=None) as ws:
     await ws.send(json.dumps({"op":"subscribe","args":args}))
+    print("OKX WebSocket connected; waiting for ticker updates...", flush=True)
     async def beat():
      while True: await asyncio.sleep(20); await ws.send("ping")
     hb=asyncio.create_task(beat())
@@ -70,10 +71,16 @@ async def okx(p):
      async for raw in ws:
       if raw=="pong":continue
       d=json.loads(raw)
-      if d.get("arg",{}).get("channel")=="tickers":
-       t=d["data"][0]; await p.tick(t["instId"].replace("-USDT-SWAP","USDT"),float(t["last"]))
+      # OKX sends subscribe acknowledgements and error events without a data array.
+      if d.get("event") == "error":
+       print("OKX subscription error:",d.get("msg",d),flush=True); continue
+      if d.get("arg",{}).get("channel")=="tickers" and d.get("data"):
+       t=d["data"][0]
+       symbol=t.get("instId","").replace("-USDT-SWAP","USDT")
+       if symbol in p.h and t.get("last"):
+        await p.tick(symbol,float(t["last"]))
     finally: hb.cancel()
-  except Exception as e: print("reconnect",e); await asyncio.sleep(3)
+  except Exception as e: print("OKX feed disconnected; retrying in 5s:",repr(e),flush=True); await asyncio.sleep(5)
 async def main():
  a=argparse.ArgumentParser(); a.add_argument("--exchange",choices=["binance","okx"],default="binance"); a.add_argument("--days",type=int,default=60); a.add_argument("--state",default="paper_state.json"); x=a.parse_args(); p=Paper(x.state)
  print("LOCAL PAPER ONLY | initial USD 10000 | leverage cap 3x | risk 0.5%/position | NO ORDER API")
