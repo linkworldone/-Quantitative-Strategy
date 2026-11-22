@@ -19,7 +19,7 @@ class Bar:
     ts:int; high:float; low:float; close:float
 @dataclass
 class Position:
-    side:int; entry:float; qty:float; stop:float; entry_fee:float
+    side:int; entry:float; qty:float; stop:float; entry_fee:float; take_profit:float=0.0
 
 def get_json(url):
     req=urllib.request.Request(url,headers={"User-Agent":"local-paper/1.0"})
@@ -72,15 +72,26 @@ class Engine:
         signal=1 if b.close>upper and e20>e50 else (-1 if b.close<lower and e20<e50 else 0)
         p=self.pos.get(s)
         if p:
-            if p.side>0:p.stop=max(p.stop,b.close-2.5*a); stop_hit=b.close<=p.stop; channel_exit=b.close<exit_low
-            else:p.stop=min(p.stop,b.close+2.5*a); stop_hit=b.close>=p.stop; channel_exit=b.close>exit_high
-            if stop_hit or channel_exit or signal==-p.side:self.close(s,b.close,"ATR stop/trail" if stop_hit else "10-bar exit/reversal")
+            if p.side>0:
+                stop_hit=b.low<=p.stop; target_hit=b.high>=p.take_profit if p.take_profit else False
+                px=p.stop if stop_hit else p.take_profit if target_hit else b.close
+                if not stop_hit:p.stop=max(p.stop,b.close-3.0*a)
+                channel_exit=b.close<exit_low
+            else:
+                stop_hit=b.high>=p.stop; target_hit=b.low<=p.take_profit if p.take_profit else False
+                px=p.stop if stop_hit else p.take_profit if target_hit else b.close
+                if not stop_hit:p.stop=min(p.stop,b.close+3.0*a)
+                channel_exit=b.close>exit_high
+            if stop_hit or target_hit or channel_exit or signal==-p.side:
+                reason="stop (conservative same-bar priority)" if stop_hit else "2R take-profit" if target_hit else "10-bar exit/reversal"
+                self.close(s,px,reason)
         elif signal and not self.halted and b.ts-self.last_exit.get(s,-self.cooldown_ms)>=self.cooldown_ms:
-            stop_pct=min(max(2.5*a/b.close,.006),.05); total=self.equity(); risk_qty=total*RISK_PER_TRADE/(2.5*a)
+            stop_dist=min(max(3.0*a,b.close*.008),b.close*.08); total=self.equity(); risk_qty=total*RISK_PER_TRADE/stop_dist
             notional_used=sum(q*self.prices.get(k,v.entry) for k,v in self.pos.items()); remaining=max(0,total*MAX_TOTAL_LEVERAGE-notional_used)
             qty=min(risk_qty,remaining/b.close); risk_used=sum(v.qty*abs(self.prices.get(k,v.entry)-v.stop) for k,v in self.pos.items())
-            if qty>0 and risk_used+qty*2.5*a<=total*MAX_TOTAL_STOP_RISK:
-                p=Position(signal,self.fill(b.close,signal),qty,b.close*(1-stop_pct if signal>0 else 1+stop_pct),0.0); fee=p.entry*qty*self.fee_rate; p.entry_fee=fee; self.cash-=fee; self.pos[s]=p; self.log(s,"OPEN",p,p.entry,fee,0,"20-bar breakout + EMA20/50 filter")
+            if qty>0 and risk_used+qty*stop_dist<=total*MAX_TOTAL_STOP_RISK:
+                entry=self.fill(b.close,signal); stop=entry-signal*stop_dist; target=entry+signal*2*stop_dist
+                p=Position(signal,entry,qty,stop,0.0,target); fee=p.entry*qty*self.fee_rate; p.entry_fee=fee; self.cash-=fee; self.pos[s]=p; self.log(s,"OPEN",p,p.entry,fee,0,"20-bar breakout + EMA20/50; 3ATR stop; 2R target")
         total=self.equity(); self.peak=max(self.peak,total)
         if total<=self.peak*.90:self.halted=True
         with open("trend_equity.csv","a",newline="",encoding="utf-8") as f:csv.writer(f).writerow([datetime.now(timezone.utc).isoformat(),round(total,2),round(self.cash,2),round(self.floating(),2),len(self.pos),self.halted])
