@@ -11,7 +11,7 @@ class Pos:
  side:int; entry:float; qty:float; stop:float; reason:str
 class Paper:
  def __init__(self,state):
-  self.path=Path(state); self.cash=START; self.peak=START; self.halt=False; self.h={s:deque(maxlen=128) for s in SYMS}; self.pos={}; self.first_quote=asyncio.Event()
+  self.path=Path(state); self.cash=START; self.peak=START; self.halt=False; self.h={s:deque(maxlen=128) for s in SYMS}; self.pos={}; self.prices={}; self.first_quote=asyncio.Event()
   if self.path.exists():
    try:
     d=json.loads(self.path.read_text()); self.cash=d["cash"]; self.peak=d["peak"]; self.halt=d["halt"]; self.pos={k:Pos(**v) for k,v in d["positions"].items()}
@@ -21,9 +21,14 @@ class Paper:
  def save(self):
   self.path.write_text(json.dumps({"cash":self.cash,"peak":self.peak,"halt":self.halt,"positions":{k:asdict(v) for k,v in self.pos.items()}},indent=2))
  def log(self,s,a,side,px,q,fee,pnl,why):
-  with open("trades.csv","a",newline="") as f: csv.writer(f).writerow([datetime.now(timezone.utc).isoformat(),s,a,side,px,q,fee,pnl,round(self.cash,2),why])
+  with open("trades.csv","a",newline="") as f: csv.writer(f).writerow([datetime.now(timezone.utc).isoformat(),s,a,side,px,q,fee,pnl,round(self.total_equity(),2),why])
+ def unrealized(self):
+  return sum(p.side*(self.prices.get(s,p.entry)-p.entry)*p.qty for s,p in self.pos.items())
+ def total_equity(self):
+  return self.cash+self.unrealized()
  async def tick(self,s,px):
   self.first_quote.set()
+  self.prices[s]=px
   h=self.h[s]
   if h and abs(px/h[-1]-1)<1e-5:return
   h.append(px)
@@ -37,11 +42,12 @@ class Paper:
    hit=px<=p.stop if p.side>0 else px>=p.stop
    if hit or sig==-p.side:self.close(s,px,"stop" if hit else "reversal")
   elif sig and not self.halt:self.open(s,px,sig,vol,"up anomaly" if sig>0 else "bearish prime")
-  self.peak=max(self.peak,self.cash)
-  if self.cash<=self.peak*.90:self.halt=True
-  with open("equity.csv","a",newline="") as f: csv.writer(f).writerow([datetime.now(timezone.utc).isoformat(),round(self.cash,2),len(self.pos),self.halt])
+  total=self.total_equity(); floating=self.unrealized()
+  self.peak=max(self.peak,total)
+  if total<=self.peak*.90:self.halt=True
+  with open("equity.csv","a",newline="") as f: csv.writer(f).writerow([datetime.now(timezone.utc).isoformat(),round(total,2),len(self.pos),self.halt])
   self.save(); p=self.pos.get(s); side="LONG" if p and p.side>0 else "SHORT" if p else "FLAT"
-  print(datetime.now(timezone.utc).isoformat(timespec="seconds"),s,format(px,".8g"),"vol24="+format(vol*100,".3f")+"%", "prime="+format(pscr,"+.2f"),"anomaly="+str(anomaly),side,"equity="+format(self.cash,".2f"),"halt="+str(self.halt))
+  print(datetime.now(timezone.utc).isoformat(timespec="seconds"),s,format(px,".8g"),"vol24="+format(vol*100,".3f")+"%", "prime="+format(pscr,"+.2f"),"anomaly="+str(anomaly),side,"cash="+format(self.cash,".2f"),"unrealized="+format(floating,"+.2f"),"TOTAL="+format(total,".2f"),"halt="+str(self.halt),flush=True)
  def open(self,s,px,side,vol,why):
   stop_pct=min(max(2.5*vol,.006),.04); qty=min(self.cash*RISK/(px*stop_pct),self.cash*MAXLEV/px)
   used=sum(p.qty*abs(p.entry-p.stop) for p in self.pos.values())
