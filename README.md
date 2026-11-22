@@ -1,31 +1,24 @@
-# Crypto perpetual paper research: live data adapters
+# Crypto perpetual paper research
 
-Files:
-- `live_paper.py`: local-only public Binance/OKX market-stream simulator.
-- `context_feeds.py`: Binance derivatives, Alternative.me sentiment, GDELT news, optional CoinGecko supply and OpenAI summaries.
-- `cost_model.py`: contract sizing and spread/slippage/funding/fee formulas.
-- `context_daemon.py`: five-minute timestamped context snapshots in `context.jsonl`.
+## Lower-turnover model
 
-## Optional API configuration
-No exchange trading keys are required or used. Set `COINGECKO_DEMO_API_KEY` for supply lookup and `OPENAI_API_KEY` for AI summarization; optionally set `OPENAI_MODEL`. Keep keys in local environment variables and never commit them. AI summarizes sourced evidence only and cannot create/override orders.
+Use `trend_paper.py` for the hourly model. It uses confirmed 1-hour candles, a 20-bar Donchian breakout with EMA20/EMA50 trend confirmation, 20-bar ATR stop sizing, 10-bar channel exit, 12-hour re-entry cooldown, 0.5% equity risk per trade, 2% aggregate stop-risk ceiling, and a 3x account-wide notional cap.
 
-## Start
-Python 3.10+:
+Fee defaults are per side: taker 5 bps (0.05%), assumed spread 2 bps and slippage 2 bps. The simulator charges an adverse synthetic fill and fee on both entry and exit. These are conservative assumptions, not a promise of actual fills. Set the fee to the rate shown in your account. Do not set maker rates unless the order logic and fill model genuinely ensure maker execution.
+
+Run for 60 days:
 ```powershell
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
-python context_daemon.py --exchange binance --symbols BTCUSDT,ETHUSDT --coins bitcoin,ethereum
+python trend_paper.py --exchange okx --days 60 --taker-fee-bps 5
 ```
-In a second terminal:
-```powershell
-python live_paper.py --exchange binance --days 60
-```
-Use exchange=okx for price paper feed. Context snapshots append every five minutes. Keep model settings fixed during the 60-day observation.
+For Binance, use `--exchange binance` only where Binance's API is available. This environment received Binance HTTP 451 restricted-location responses, so Binance simulation could not be verified here. The script has no credentials and never sends orders. Trade/equity logs are `trend_trades.csv` and `trend_equity.csv`; state is `trend_state.json`.
 
-## Data integrity and important limit
-Unavailable inputs are explicitly tagged, never silently treated as neutral. Binance top-trader ratio is a positioning proxy, not verified “smart money.” Fear & Greed is market-wide. GDELT provides article metadata/headlines, not verified full-text sentiment. Supply requires canonical CoinGecko IDs and API key. General cross-chain whale-flow requires a dedicated provider/key and correct chain/token mapping; until configured this input is unavailable.
+Lower turnover comes from evaluating only closed hourly bars and waiting 12 hours after exit before re-entry. This reduces churn but can miss moves and does not guarantee higher net returns. Funding is not yet charged in this model, and spread is an estimate rather than live bid/ask execution. Review costs separately before using results.
 
-**The live_paper execution loop is not yet wired to consume context_daemon snapshots or cost_model helpers.** Its fills/PnL remain simplified and do not fully account for funding, spread, depth/slippage, contract size, or liquidation mechanics. The adapters and formulas are available for integration, but this is not yet a cost-adjusted complete simulation. No real orders are sent. Do not treat results as validated or predictive.
+## Existing experimental modules
 
-Sources: [Binance USD-M Futures market data](https://developers.binance.com/docs/derivatives/usds-margined-futures/market-data), [Alternative.me Fear & Greed](https://alternative.me/crypto/fear-and-greed-index/), [OpenAI Responses API](https://platform.openai.com/docs/api-reference/responses), [CoinGecko API](https://docs.coingecko.com/reference/coins-id).
+- `live_paper.py`: earlier tick-sample prime heuristic; retained for comparison, not recommended as the primary evaluation.
+- `context_feeds.py`: public derivatives, sentiment/news, optional CoinGecko supply/OpenAI summaries.
+- `context_daemon.py`: five-minute context snapshots; these are not consumed by `trend_paper.py` signals.
+- `cost_model.py`: reusable cost formula helpers.
+
+The regular USDⓈ-M example fee in Binance's published fee explanation is maker 0.02%, taker 0.05%, while the actual fee varies by VIP level and discounts. OKX says rates depend on the account's tier and instrument; use the rate displayed for your own account. Sources: [Binance Futures fee explanation](https://www.binance.com/en/support/faq/detail/360033544231), [OKX fee rules](https://www.okx.com/help/trading-fee-rules-faq), [OKX account fee-rate API](https://www.okx.com/docs-v5/en/#rest-api-account-get-fee-rates).
