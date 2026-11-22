@@ -11,7 +11,7 @@ class Pos:
  side:int; entry:float; qty:float; stop:float; reason:str
 class Paper:
  def __init__(self,state):
-  self.path=Path(state); self.cash=START; self.peak=START; self.halt=False; self.h={s:deque(maxlen=128) for s in SYMS}; self.pos={}
+  self.path=Path(state); self.cash=START; self.peak=START; self.halt=False; self.h={s:deque(maxlen=128) for s in SYMS}; self.pos={}; self.first_quote=asyncio.Event()
   if self.path.exists():
    try:
     d=json.loads(self.path.read_text()); self.cash=d["cash"]; self.peak=d["peak"]; self.halt=d["halt"]; self.pos={k:Pos(**v) for k,v in d["positions"].items()}
@@ -23,6 +23,7 @@ class Paper:
  def log(self,s,a,side,px,q,fee,pnl,why):
   with open("trades.csv","a",newline="") as f: csv.writer(f).writerow([datetime.now(timezone.utc).isoformat(),s,a,side,px,q,fee,pnl,round(self.cash,2),why])
  async def tick(self,s,px):
+  self.first_quote.set()
   h=self.h[s]
   if h and abs(px/h[-1]-1)<1e-5:return
   h.append(px)
@@ -84,8 +85,16 @@ async def okx(p):
 async def main():
  a=argparse.ArgumentParser(); a.add_argument("--exchange",choices=["binance","okx"],default="binance"); a.add_argument("--days",type=int,default=60); a.add_argument("--state",default="paper_state.json"); x=a.parse_args(); p=Paper(x.state)
  print("LOCAL PAPER ONLY | initial USD 10000 | leverage cap 3x | risk 0.5%/position | NO ORDER API")
- try: await asyncio.wait_for(binance(p) if x.exchange=="binance" else okx(p),timeout=x.days*86400)
- except asyncio.TimeoutError: print("Paper observation ended")
+ feed=asyncio.create_task(binance(p) if x.exchange=="binance" else okx(p))
+ try:
+  await asyncio.wait_for(p.first_quote.wait(),timeout=120)
+  print(f"First live quote received. {x.days}-day observation timer starts now.",flush=True)
+  try: await asyncio.wait_for(feed,timeout=x.days*86400)
+  except asyncio.TimeoutError: print("Paper observation ended")
+ except asyncio.TimeoutError:
+  feed.cancel(); print("No live quote received within 120s; observation was NOT started.")
+ except KeyboardInterrupt:
+  feed.cancel(); print("Stopped")
  except KeyboardInterrupt: print("Stopped")
 if __name__=="__main__": asyncio.run(main())
 
