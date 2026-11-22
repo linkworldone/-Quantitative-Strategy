@@ -89,7 +89,14 @@ class Engine:
     def __init__(self,exchange,state,fee_bps,slippage_bps,spread_bps,cooldown_minutes):
         self.exchange=exchange; self.state=Path(state); self.cash=START; self.peak=START; self.halted=False
         self.fee_rate=fee_bps/10000; self.slippage_bps=slippage_bps; self.spread_bps=spread_bps; self.cooldown_ms=cooldown_minutes*60000; self.last_action_ts=0
-        self.bars={s:warmup(exchange,s) for s in SYMBOLS}; self.pos={}; self.last_ts={s:(self.bars[s][-1].ts if self.bars[s] else 0) for s in SYMBOLS}
+        self.bars={}
+        for i,s in enumerate(SYMBOLS,1):
+            print(f"[{i}/{len(SYMBOLS)}] Fetching OKX/Binance 5m history for {s}...",flush=True)
+            try:self.bars[s]=warmup(exchange,s)
+            except Exception as ex:raise RuntimeError(f"Initial candle download failed for {s} via {exchange}: {ex}") from ex
+            print(f"[{i}/{len(SYMBOLS)}] {s}: loaded {len(self.bars[s])} confirmed 5m candles",flush=True)
+            if not self.bars[s]:raise RuntimeError(f"No confirmed 5m candles received for {s} via {exchange}")
+        self.pos={}; self.last_ts={s:(self.bars[s][-1].ts if self.bars[s] else 0) for s in SYMBOLS}
         self.daily_streaks={}; self.returns24={}; self.top_gainers=set(); self.context_updated=0
         if self.state.exists():
             d=json.loads(self.state.read_text()); self.cash=d.get("cash",START); self.peak=d.get("peak",START); self.halted=d.get("halted",False); self.last_action_ts=d.get("last_action_ts",0); self.pos={s:Position(**v) for s,v in d.get("positions",{}).items()}
@@ -192,7 +199,8 @@ async def refresh_context(e):
         await asyncio.sleep(300)
 async def main():
     ap=argparse.ArgumentParser();ap.add_argument("--exchange",choices=["binance","okx"],default="okx");ap.add_argument("--days",type=int,default=60);ap.add_argument("--state",default="paper_5m_state.json");ap.add_argument("--taker-fee-bps",type=float,default=DEFAULT_TAKER_FEE_BPS,help="fee per side in basis points; set from your account's current fee tier");ap.add_argument("--slippage-bps",type=float,default=DEFAULT_SLIPPAGE_BPS);ap.add_argument("--spread-bps",type=float,default=DEFAULT_SPREAD_BPS);ap.add_argument("--cooldown-minutes",type=int,default=10);a=ap.parse_args()
-    e=Engine(a.exchange,a.state,a.taker_fee_bps,a.slippage_bps,a.spread_bps,a.cooldown_minutes);print(f"5-MIN DONCHIAN/EMA PAPER ONLY; no order API; initial principal USD 10000; max 3x; per-trade stop/target USD {START*BRACKET_PNL_FRACTION:.0f}; 10-minute cooldown; fee={a.taker_fee_bps:g}bps/side")
+    print(f"Starting {a.exchange.upper()} paper simulation; downloading initial candles for {len(SYMBOLS)} symbols. No real orders will be sent.",flush=True)
+    e=Engine(a.exchange,a.state,a.taker_fee_bps,a.slippage_bps,a.spread_bps,a.cooldown_minutes);print(f"5-MIN DONCHIAN/EMA PAPER ONLY; no order API; initial principal USD 10000; max 3x; per-trade stop/target USD {START*BRACKET_PNL_FRACTION:.0f}; 10-minute cooldown; fee={a.taker_fee_bps:g}bps/side",flush=True)
     feed=asyncio.create_task(run_binance(e) if a.exchange=="binance" else run_okx(e)); context=asyncio.create_task(refresh_context(e))
     try:await asyncio.wait_for(feed,timeout=a.days*86400)
     except asyncio.TimeoutError:print("Observation period finished")
