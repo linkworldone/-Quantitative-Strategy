@@ -44,6 +44,36 @@ def warmup(exchange,symbol):
     rows=get_json("https://www.okx.com/api/v5/market/history-candles?"+urllib.parse.urlencode({"instId":inst,"bar":"5m","limit":"100"}))["data"]
     return [Bar(int(x[0]),float(x[1]),float(x[2]),float(x[3]),float(x[4]),float(x[5])) for x in reversed(rows) if len(x)>8 and x[8]=="1"]
 
+def daily_streak(exchange,symbol):
+    """Count consecutive completed up daily candles; never use the live daily candle."""
+    now=int(time.time()*1000)
+    if exchange=="binance":
+        rows=get_json(f"https://fapi.binance.com/fapi/v1/klines?symbol={symbol}&interval=1d&limit=12")
+        rows=[x for x in rows if int(x[0])+86_400_000<=now]
+        closes=[float(x[4]) for x in rows]
+    else:
+        inst=symbol.replace("USDT","-USDT-SWAP")
+        rows=get_json("https://www.okx.com/api/v5/market/history-candles?"+urllib.parse.urlencode({"instId":inst,"bar":"1Dutc","limit":"12"}))["data"]
+        rows=[x for x in reversed(rows) if len(x)>8 and x[8]=="1" and int(x[0])+86_400_000<=now]
+        closes=[float(x[4]) for x in rows]
+    streak=0
+    for i in range(len(closes)-1,0,-1):
+        if closes[i]>closes[i-1]:streak+=1
+        else:break
+    return streak
+
+def gainer_returns(exchange):
+    """Rolling 24h returns for the configured watchlist, from public swap tickers."""
+    if exchange=="binance":
+        rows=get_json("https://fapi.binance.com/fapi/v1/ticker/24hr")
+        return {s:float(x["priceChangePercent"])/100 for x in rows if (s:=x.get("symbol")) in SYMBOLS}
+    rows=get_json("https://www.okx.com/api/v5/market/tickers?instType=SWAP")["data"]
+    wanted={s:s.replace("USDT","-USDT-SWAP") for s in SYMBOLS}; out={}
+    for x in rows:
+        sym=next((s for s,i in wanted.items() if x.get("instId")==i),None)
+        if sym and float(x.get("open24h") or 0)>0:out[sym]=float(x["last"])/float(x["open24h"])-1
+    return out
+
 def ema(values,n):
     alpha=2/(n+1); out=values[0]
     for v in values[1:]:out=alpha*v+(1-alpha)*out
@@ -60,11 +90,30 @@ class Engine:
         self.exchange=exchange; self.state=Path(state); self.cash=START; self.peak=START; self.halted=False
         self.fee_rate=fee_bps/10000; self.slippage_bps=slippage_bps; self.spread_bps=spread_bps; self.cooldown_ms=cooldown_minutes*60000; self.last_action_ts=0
         self.bars={s:warmup(exchange,s) for s in SYMBOLS}; self.pos={}; self.last_ts={s:(self.bars[s][-1].ts if self.bars[s] else 0) for s in SYMBOLS}
+        self.daily_streaks={}; self.returns24={}; self.top_gainers=set(); self.context_updated=0
         if self.state.exists():
             d=json.loads(self.state.read_text()); self.cash=d.get("cash",START); self.peak=d.get("peak",START); self.halted=d.get("halted",False); self.last_action_ts=d.get("last_action_ts",0); self.pos={s:Position(**v) for s,v in d.get("positions",{}).items()}
         for f,h in [("paper_5m_trades.csv","utc,symbol,action,side,price,qty,fee,pnl,total_equity,reason"),("paper_5m_equity.csv","utc,total_equity,cash,unrealized,open_positions,halted")]:
             if not Path(f).exists():Path(f).write_text(h+"\n",encoding="utf-8")
         self.prices={s:(self.bars[s][-1].close if self.bars[s] else 0) for s in SYMBOLS}
+    def refresh_market_context(self):
+        """Refresh 24h watchlist ranking every call and daily streaks every 6h."""
+        try:
+            self.returns24=gainer_returns(self.exchange)
+            ranked=sorted(((r,s) for s,r in self.returns24.items() if r>0),reverse=True)
+            self.top_gainers={s for _,s in ranked[:3]}
+        except Exception as ex:
+            self.returns24={}; self.top_gainers=set()
+            print("24h gainer context unavailable; gainer shorts disabled:",repr(ex),flush=True)
+        if time.time()-self.context_updated>=6*3600:
+            updated={}
+            for s in SYMBOLS:
+                try:updated[s]=daily_streak(self.exchange,s)
+                except Exception as ex:print("daily streak unavailable",s,repr(ex),flush=True)
+            self.daily_streaks=updated
+            self.context_updated=time.time() if len(updated)==len(SYMBOLS) else time.time()-(6*3600-300)
+        selected=sorted(self.top_gainers)
+        print("Gainers(top3, watchlist):",", ".join(f"{s} {self.returns24[s]*100:+.2f}%/24h streak={self.daily_streaks.get(s,'?')}d" for s in selected) or "none",flush=True)
     def floating(self):return sum(p.side*(self.prices.get(s,p.entry)-p.entry)*p.qty for s,p in self.pos.items())
     def equity(self):return self.cash+self.floating()
     def persist(self):self.state.write_text(json.dumps({"cash":self.cash,"peak":self.peak,"halted":self.halted,"last_action_ts":self.last_action_ts,"positions":{s:asdict(p) for s,p in self.pos.items()}},indent=2))
@@ -82,10 +131,11 @@ class Engine:
         upper=max(x.high for x in bars[-21:-1]); lower=min(x.low for x in bars[-21:-1]); alpha_high=max(x.high for x in bars[-13:-1])
         avg_volume=sum(x.volume for x in bars[-21:-1])/20
         alpha_long=b.close>alpha_high and b.close>e20 and b.close>b.open and avg_volume>0 and b.volume>=1.5*avg_volume
+        alpha_short=s in self.top_gainers and self.daily_streaks.get(s,0)>=3 and b.close<min(x.low for x in bars[-13:-1]) and b.close<e20 and b.close<b.open and avg_volume>0 and b.volume>=1.5*avg_volume
         trend_long=b.close>upper and e20>e50
         trend_short=b.close<lower and e20<e50
-        signal=1 if alpha_long or trend_long else (-1 if trend_short else 0)
-        entry_reason="5m alpha impulse: 12-bar high + volume >=1.5x" if alpha_long else "20-bar breakout + EMA20/50" if trend_long else "20-bar bearish breakout + EMA20/50"
+        signal=-1 if alpha_short else (1 if alpha_long or trend_long else (-1 if trend_short else 0))
+        entry_reason="gainer short: top-3 watchlist 24h + >=3 completed up days + 5m bearish breakdown/volume" if alpha_short else "5m alpha impulse: 12-bar high + volume >=1.5x" if alpha_long else "20-bar breakout + EMA20/50" if trend_long else "20-bar bearish breakout + EMA20/50"
         p=self.pos.get(s)
         if p:
             if p.side>0:
@@ -107,7 +157,7 @@ class Engine:
         total=self.equity(); self.peak=max(self.peak,total)
         if total<=self.peak*.90:self.halted=True
         with open("paper_5m_equity.csv","a",newline="",encoding="utf-8") as f:csv.writer(f).writerow([datetime.now(timezone.utc).isoformat(),round(total,2),round(self.cash,2),round(self.floating(),2),len(self.pos),self.halted])
-        self.persist(); print(datetime.now(timezone.utc).isoformat(timespec="seconds"),s,"close",b.close,"ATR",round(a,6),"signal",signal,"cash",round(self.cash,2),"floating",round(self.floating(),2),"TOTAL",round(total,2),"halt",self.halted,flush=True)
+        self.persist(); print(datetime.now(timezone.utc).isoformat(timespec="seconds"),s,"close",b.close,"ATR",round(a,6),"signal",signal,"streak",self.daily_streaks.get(s,"?"),"gainer24h",round(self.returns24.get(s,0)*100,2),"cash",round(self.cash,2),"floating",round(self.floating(),2),"TOTAL",round(total,2),"halt",self.halted,flush=True)
 
 async def run_binance(e):
     streams="/".join(s.lower()+"@kline_5m" for s in SYMBOLS); url="wss://fstream.binance.com/stream?streams="+streams
@@ -136,12 +186,16 @@ async def run_okx(e):
                             if len(x)>8 and x[8]=="1":e.on_bar(arg["instId"].replace("-USDT-SWAP","USDT"),Bar(int(x[0]),float(x[1]),float(x[2]),float(x[3]),float(x[4]),float(x[5])))
                 finally:hb.cancel()
         except Exception as ex:print("OKX stream reconnect:",repr(ex),flush=True);await asyncio.sleep(5)
+async def refresh_context(e):
+    while True:
+        await asyncio.to_thread(e.refresh_market_context)
+        await asyncio.sleep(300)
 async def main():
     ap=argparse.ArgumentParser();ap.add_argument("--exchange",choices=["binance","okx"],default="okx");ap.add_argument("--days",type=int,default=60);ap.add_argument("--state",default="paper_5m_state.json");ap.add_argument("--taker-fee-bps",type=float,default=DEFAULT_TAKER_FEE_BPS,help="fee per side in basis points; set from your account's current fee tier");ap.add_argument("--slippage-bps",type=float,default=DEFAULT_SLIPPAGE_BPS);ap.add_argument("--spread-bps",type=float,default=DEFAULT_SPREAD_BPS);ap.add_argument("--cooldown-minutes",type=int,default=10);a=ap.parse_args()
     e=Engine(a.exchange,a.state,a.taker_fee_bps,a.slippage_bps,a.spread_bps,a.cooldown_minutes);print(f"5-MIN DONCHIAN/EMA PAPER ONLY; no order API; initial principal USD 10000; max 3x; per-trade stop/target USD {START*BRACKET_PNL_FRACTION:.0f}; 10-minute cooldown; fee={a.taker_fee_bps:g}bps/side")
-    feed=asyncio.create_task(run_binance(e) if a.exchange=="binance" else run_okx(e))
+    feed=asyncio.create_task(run_binance(e) if a.exchange=="binance" else run_okx(e)); context=asyncio.create_task(refresh_context(e))
     try:await asyncio.wait_for(feed,timeout=a.days*86400)
     except asyncio.TimeoutError:print("Observation period finished")
-    except KeyboardInterrupt:feed.cancel();print("Stopped")
+    except KeyboardInterrupt:feed.cancel();context.cancel();print("Stopped")
 if __name__=="__main__":asyncio.run(main())
 
